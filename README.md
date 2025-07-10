@@ -9,7 +9,8 @@ Put the chromedriver executable in the root folder and set the path (when asked)
 ```
 #### Using a package manager:
 Just set the path to ```bash
-chromedriver```
+chromedriver
+```
 
 ## Compile
 ### Dependencies
