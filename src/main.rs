@@ -1,4 +1,5 @@
 use std::{error::Error, fs::{create_dir_all, File}, io::{Read, Write}, path::Path, process::Command};
+use reqwest::StatusCode;
 use thirtyfour::{prelude::*};
 
 #[tokio::main]
@@ -162,12 +163,18 @@ async fn get_emotes_of_user(driver: &WebDriver, user_id: String) -> Result<(), B
             continue;
         }
 
-        println!("Downloading: {} {} ({}/{})", &name, &url, i+1,emotes.len());
         // write file
-        let response = reqwest::get(url).await?;
+        let response = reqwest::get(url.clone()).await?;
+        if response.status().eq(&StatusCode::OK) {
+            println!("Downloaded: {} {} ({}/{})", &name, &url, i+1,emotes.len());
+            downloaded_counter += 1;
+        } else {
+            println!("Failed! (Error: {}) while downloading: {} {} ({}/{})", response.status().as_str(), &name, &url, i+1,emotes.len());
+            continue;
+        }
+
         let mut emote_file = File::create(file_path)?;
         emote_file.write_all(&response.bytes().await?)?;
-        downloaded_counter += 1;
     }
 
     println!("Successfully downloaded {} emotes.", downloaded_counter);
