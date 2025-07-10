@@ -14,5 +14,5 @@ pkg-config
 ``
 
 ### Build
-Replace your target with one of these [platforms](https://doc.rust-lang.org/nightly/rustc/platform-support.html).
+Replace your target with one of these [platforms](https://doc.rust-lang.org/nightly/rustc/platform-support.html).  
 ``cargo build --release --target yourtarget``
