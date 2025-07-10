@@ -1,10 +1,10 @@
-use std::{error::Error, fs::{create_dir_all, File}, io::{Read, Write}, path::Path, process::Command, str::Utf8Error};
+use std::{error::Error, fs::{create_dir_all, File}, io::{Read, Write}, path::Path, process::Command};
 use thirtyfour::{prelude::*};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let mut caps = DesiredCapabilities::chrome();
-    //caps.set_headless()?;
+    caps.set_headless()?;
 
     setup_chromedriver().await?;
 
@@ -72,7 +72,7 @@ async fn selector(driver: &WebDriver) -> Result<(), Box<dyn Error + Send + Sync>
 
 async fn get_emotes_of_user(driver: &WebDriver, user_id: String) -> Result<(), Box<dyn Error + Send + Sync>> {
     let user_id = user_id;
-    
+
     // load user page
     let user_url = std::format!("https://7tv.app/users/{}", user_id.trim());
     driver.goto(user_url).await?;
