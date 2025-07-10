@@ -1,10 +1,10 @@
-use std::{error::Error, fs::{create_dir_all, File}, io::{Read, Write}, path::Path, process::Command};
+use std::{error::Error, fs::{create_dir_all, File}, io::{Read, Write}, path::Path, process::Command, str::Utf8Error};
 use thirtyfour::{prelude::*};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let mut caps = DesiredCapabilities::chrome();
-    caps.set_headless()?;
+    //caps.set_headless()?;
 
     setup_chromedriver().await?;
 
@@ -62,7 +62,7 @@ async fn selector(driver: &WebDriver) -> Result<(), Box<dyn Error + Send + Sync>
     let mut answer = String::new();
     stdin.read_line(&mut answer)?;
     
-    if answer.contains("y") {
+    if answer.trim().eq("y") || answer.trim().eq("yes") {
         Box::pin(selector(&driver)).await?;
     } else {
         println!("goodbye :3");
@@ -71,15 +71,19 @@ async fn selector(driver: &WebDriver) -> Result<(), Box<dyn Error + Send + Sync>
 }
 
 async fn get_emotes_of_user(driver: &WebDriver, user_id: String) -> Result<(), Box<dyn Error + Send + Sync>> {
-let user_id = user_id;//"01FNA3H09800068STSDCEP6NE9";//"01HG91JYR80005B1SPJPE30JA0";//"01FF67X978000D76QJKE5PX0SG";
+    let user_id = user_id;//"01FNA3H09800068STSDCEP6NE9";//"01HG91JYR80005B1SPJPE30JA0";//"01FF67X978000D76QJKE5PX0SG";
 
     // load user page
-    let user_url = std::format!("https://7tv.app/users/{user_id}");
+    let user_url = std::format!("https://7tv.app/users/{}", user_id.trim());
     driver.goto(user_url).await?;
     println!("Loading page...");
 
     // wait until emote container is loaded or user not exists
     driver.query(By::ClassName("emotes")).first().await?;
+
+    // query username
+    let user_name = driver.query(By::ClassName("name")).without_text("").and_displayed().first().await?.text().await?;
+    println!("Found user: {}", &user_name);
     
     // load all emotes by scrolling
     println!("Loading emotes...");
@@ -102,7 +106,7 @@ let user_id = user_id;//"01FNA3H09800068STSDCEP6NE9";//"01HG91JYR80005B1SPJPE30J
                 .move_to_element_center( &part_emotes[part_emotes.len() - 1])
                 .perform().await?;
 
-            println!("Loaded {} emotes...", part_emotes.len() - 1);
+            println!("Loaded {} emotes...", part_emotes.len());
         }
 
         old_part_emotes_length = part_emotes.len();
@@ -122,13 +126,12 @@ let user_id = user_id;//"01FNA3H09800068STSDCEP6NE9";//"01HG91JYR80005B1SPJPE30J
         };
     }
 
-    let user_name = driver.find(By::ClassName("name")).await?.text().await?;
-    let emotes = driver.find_all(By::ClassName("emote")).await?;
+    let emotes = driver.query(By::ClassName("emote")).all_from_selector().await?;
 
     if emotes.len() == 0 {
         return Ok(());
     }
-    println!("Finished loading {} emotes.", emotes.len() - 1);
+    println!("Finished loading {} emotes.", emotes.len());
 
     // create download path
     let path_name = format!("useremotes/{}", &user_name);
@@ -155,11 +158,11 @@ let user_id = user_id;//"01FNA3H09800068STSDCEP6NE9";//"01HG91JYR80005B1SPJPE30J
         
         // check if file exists
         if file_path.exists() {
-            println!("{name}.{extension} already exists - skipping. ({i}/{})", emotes.len()-1);
+            println!("{name}.{extension} already exists - skipping. ({}/{})", i+1, emotes.len());
             continue;
         }
 
-        println!("Downloading: {} {} ({i}/{})", &name, &url, emotes.len()-1);
+        println!("Downloading: {} {} ({}/{})", &name, &url, i+1,emotes.len());
         // write file
         let response = reqwest::get(url).await?;
         let mut emote_file = File::create(file_path)?;
