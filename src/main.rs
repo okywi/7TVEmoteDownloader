@@ -71,8 +71,8 @@ async fn selector(driver: &WebDriver) -> Result<(), Box<dyn Error + Send + Sync>
 }
 
 async fn get_emotes_of_user(driver: &WebDriver, user_id: String) -> Result<(), Box<dyn Error + Send + Sync>> {
-    let user_id = user_id;//"01FNA3H09800068STSDCEP6NE9";//"01HG91JYR80005B1SPJPE30JA0";//"01FF67X978000D76QJKE5PX0SG";
-
+    let user_id = user_id;
+    
     // load user page
     let user_url = std::format!("https://7tv.app/users/{}", user_id.trim());
     driver.goto(user_url).await?;
