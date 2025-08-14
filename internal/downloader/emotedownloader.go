@@ -2,7 +2,6 @@ package downloader
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -10,9 +9,12 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"time"
 
 	"golang.org/x/sync/errgroup"
 )
+
+var mutex sync.Mutex
 
 type emote struct {
 	id              string
@@ -31,6 +33,7 @@ type emoteDownloader struct {
 	user                     map[string]any
 	emoteSets                []*emoteSet
 	currentDownloadIndicator string
+	percentage               float64
 }
 
 func (e *emoteSet) String() string {
@@ -38,7 +41,8 @@ func (e *emoteSet) String() string {
 }
 
 func fetchUser(userId string) (map[string]any, error) {
-	userUrl := fmt.Sprintf("https://7tv.io/v3/users/%s", userId)
+
+	userUrl := fmt.Sprintf("https://7tv.io/v3/users/%s", "01H3FRQXT00007Y62Y79WSW8PM")
 
 	userResp, uErr := http.Get(userUrl)
 	if uErr != nil {
@@ -47,7 +51,7 @@ func fetchUser(userId string) (map[string]any, error) {
 	defer userResp.Body.Close()
 
 	if userResp.StatusCode != 200 {
-		return nil, errors.New("user not found")
+		return nil, fmt.Errorf("user not found. Error Code: %s", userResp.Status)
 	}
 
 	body, rErr := io.ReadAll(userResp.Body)
@@ -91,26 +95,32 @@ func downloadAndWriteEmoteSets(model *model, emoteSets []*emoteSet, selectedType
 	for _, set := range emoteSets {
 		emotePath := fmt.Sprintf("emotes/%s/%s", username, set.name)
 		if err := os.MkdirAll(emotePath, os.ModePerm); err != nil {
-			fmt.Printf("Failed to create directory for emote set: %s\n Error: %s", set.name, err)
+			*model.stateHeader = fmt.Sprintf("Failed to create directory for emote set: %s\n Error: %s", set.name, err)
 		}
 
-		//fmt.Println("Downloading emote set ", set.name)
+		*model.stateHeader = fmt.Sprintf("Emote Set: %s: ", set.name)
+		percentageIncrease := 1 / float64(len(set.emotes))
 
 		// download emotes
 		group := new(errgroup.Group)
 		group.SetLimit(runtime.NumCPU())
 		for i := range set.emotes {
 			group.Go(func() error {
-				downloadEmote(model, emotePath, set.emotes[i], selectedTypes, selectedSizes)
+				downloadEmote(model, emotePath, set.emotes[i], selectedTypes, selectedSizes, percentageIncrease)
 				return nil
 			})
 		}
 
-		group.Wait()
+		err := group.Wait()
+		if err != nil {
+			model.emoteDownloader.currentDownloadIndicator = err.Error()
+		}
+
+		model.emoteDownloader.currentDownloadIndicator = fmt.Sprintf("Successfully downloaded %d emotes from the %s emote set of %s.", len(set.emotes), set.name, username)
 	}
 }
 
-func downloadEmote(model *model, emotePath string, emote *emote, selectedTypes []string, selectedSizes []string) {
+func downloadEmote(model *model, emotePath string, emote *emote, selectedTypes []string, selectedSizes []string, percentageIncrease float64) {
 	wg := sync.WaitGroup{}
 	for _, fileType := range selectedTypes {
 		fileType = strings.ToUpper(fileType)
@@ -120,7 +130,8 @@ func downloadEmote(model *model, emotePath string, emote *emote, selectedTypes [
 					wg.Add(1)
 					go func() {
 						defer wg.Done()
-						//startTime := time.Now()
+
+						startTime := time.Now()
 						url := emote.urlsByImageType[fileType][size]
 						// emotes/username/emoteset/GIF4x/
 						directoryPath := emotePath + "/" + fileType + size
@@ -130,7 +141,10 @@ func downloadEmote(model *model, emotePath string, emote *emote, selectedTypes [
 						filePath := directoryPath + "/" + fileName
 
 						if _, err := os.Stat(filePath); err == nil {
+							mutex.Lock()
 							model.emoteDownloader.currentDownloadIndicator = fmt.Sprintf("%s already exists - skipping\n", filePath)
+							model.emoteDownloader.percentage += percentageIncrease
+							mutex.Unlock()
 							return
 						}
 
@@ -156,11 +170,14 @@ func downloadEmote(model *model, emotePath string, emote *emote, selectedTypes [
 							if err != nil {
 								fmt.Printf("Failed to write emote to file %s\n", fileName)
 							}
-							//model.emoteDownloader.currentDownloadIndicator = fmt.Sprintf("Downloaded %s", emote.name)
 
-							//endTime := time.Now()
-							//took := endTime.Sub(startTime)
-							//model.emoteDownloader.currentDownloadIndicator += fmt.Sprintf(" - took %.2f seconds\n", float64(took.Milliseconds())/1000)
+							endTime := time.Now()
+							took := endTime.Sub(startTime)
+
+							mutex.Lock()
+							model.emoteDownloader.percentage += percentageIncrease
+							model.emoteDownloader.currentDownloadIndicator = fmt.Sprintf("Downloaded %s - took %.2f seconds", emote.name, float64(took.Milliseconds())/1000)
+							mutex.Unlock()
 						} else {
 							fmt.Printf("Failed to create file for %s\n Error: %s\n", fileName, err)
 						}

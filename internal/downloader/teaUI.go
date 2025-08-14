@@ -3,48 +3,91 @@ package downloader
 import (
 	"fmt"
 	"slices"
+	"time"
 
 	"github.com/charmbracelet/bubbles/progress"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 )
 
+type selectionState int
+
+const (
+	Username selectionState = iota
+	Emotesets
+	ImageTypes
+	ImageSizes
+	Download
+)
+
+var selectionStates map[selectionState]string = map[selectionState]string{
+	Username:   "Username",
+	Emotesets:  "Emotesets",
+	ImageTypes: "ImageTypes",
+	ImageSizes: "ImageSizes",
+	Download:   "Download",
+}
+
+func (state selectionState) String() string {
+	return selectionStates[state]
+}
+
+func (state selectionState) transition() selectionState {
+	switch state {
+	case Username:
+		return Emotesets
+	case Emotesets:
+		return ImageTypes
+	case ImageTypes:
+		return ImageSizes
+	case ImageSizes:
+		return Download
+	case Download:
+		return Username
+	default:
+		return 0
+	}
+}
+
 type model struct {
 	cursor           int
 	choices          []string
 	selected         map[int]any
-	stateSelections  map[string][]string
-	textInput        textinput.Model
-	states           []string
-	currentState     int
-	stateHeader      string
+	currentState     selectionState
+	stateSelections  map[selectionState][]string
+	userIdInput      textinput.Model
+	stateHeader      *string
 	emoteDownloader  *emoteDownloader
 	downloadProgress progress.Model
 }
 
-func InitialModel() model {
+type tickMsg time.Time
+
+func InitialModel() *model {
 	// username input
-	textInput := textinput.New()
-	textInput.Width = 200
-	textInput.Placeholder = "User id..."
-	textInput.Prompt = ":3 | "
-	textInput.Focus()
+	userIdInput := textinput.New()
+	userIdInput.Width = 200
+	userIdInput.Placeholder = "User id..."
+	userIdInput.Prompt = ":3 | "
+	userIdInput.Focus()
 
 	// download progress
-	progress := progress.New()
-	progress.Width = 200
+	progress := progress.New(progress.WithDefaultGradient())
+	progress.Width = 50
 
-	return model{
+	stateHeader := "Please input the user id:"
+
+	model := &model{
 		emoteDownloader:  &emoteDownloader{},
 		choices:          make([]string, 0),
-		states:           []string{"username", "emotesets", "imagetypes", "imagesizes", "download"},
-		stateSelections:  make(map[string][]string),
-		currentState:     0,
+		stateSelections:  make(map[selectionState][]string),
 		selected:         make(map[int]any),
-		stateHeader:      "Please input the user id:",
-		textInput:        textInput,
+		userIdInput:      userIdInput,
+		stateHeader:      &stateHeader,
 		downloadProgress: progress,
 	}
+
+	return model
 }
 
 func (m model) Init() tea.Cmd {
@@ -63,31 +106,46 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	switch m.states[m.currentState] {
-	case "username":
-		m.textInput, cmd = m.textInput.Update(msg)
+	switch m.currentState {
+	case Username:
+		m.userIdInput, cmd = m.userIdInput.Update(msg)
 
 		switch msg := msg.(type) {
 		case tea.KeyMsg:
 			switch msg.String() {
 			case "enter":
-				userId := m.textInput.Value()
+				userId := m.userIdInput.Value()
 
 				var err error
 				m.emoteDownloader.user, err = fetchUser(userId)
 				if err != nil {
-					m.textInput.SetValue("User not found :/")
+					m.userIdInput.SetValue(err.Error())
+					m.userIdInput.Blur()
 					return m, cmd
 				}
 
 				username := m.emoteDownloader.user["username"].(string)
-				m.textInput.SetValue(username)
+				m.userIdInput.SetValue(username)
 
-				m.changeState()
+				cmd = m.changeState()
+
 				return m, cmd
 			}
 		}
-	case "download":
+		return m, cmd
+	case Download:
+		switch msg.(type) {
+		case tickMsg:
+			cmd := m.downloadProgress.SetPercent(m.emoteDownloader.percentage)
+			return m, tea.Batch(cmd, tickCmd())
+			// FrameMsg is sent when the progress bar wants to animate itself
+		case progress.FrameMsg:
+			progressModel, cmd := m.downloadProgress.Update(msg)
+			m.downloadProgress = progressModel.(progress.Model)
+			return m, cmd
+		}
+		return m, tickCmd()
+
 	default:
 		switch msg := msg.(type) {
 
@@ -104,7 +162,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, cmd
 			case "s":
-				m.changeState()
+				cmd := m.changeState()
+				return m, cmd
 			case "up", "k":
 				if m.cursor > 0 {
 					m.cursor--
@@ -119,43 +178,47 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	// Return the updated model to the Bubble Tea runtime for processing.
 	// Note that we're not returning a command.
-	return m, cmd
+	return m, nil
 }
 
-func (m *model) changeState() {
+func tickCmd() tea.Cmd {
+	return tea.Tick(time.Millisecond*16, func(t time.Time) tea.Msg {
+		return tickMsg(t)
+	})
+}
+
+func (m *model) changeState() tea.Cmd {
+	var cmd tea.Cmd
+	nextState := selectionState.transition(m.currentState)
+
 	// set choices according to state
-	state := m.states[m.currentState]
-	if state != "username" {
+	if nextState != Username {
 		stateSelection := []string{}
 		for i, choice := range m.choices {
 			if _, ok := m.selected[i]; ok {
 				stateSelection = append(stateSelection, choice)
 			}
 		}
-		m.stateSelections[state] = stateSelection
+		m.stateSelections[m.currentState] = stateSelection
 	}
 
-	m.currentState = (m.currentState + 1) % len(m.states)
-
-	switch m.states[m.currentState] {
-	case "username":
-		m.textInput.Focus()
-	case "emotesets":
+	switch nextState {
+	case Emotesets:
 		// clear input
-		m.textInput.Reset()
-		m.textInput.Blur()
+		m.userIdInput.Reset()
+		m.userIdInput.Blur()
 
-		m.stateHeader = "Select the emote sets you want to download:"
+		*m.stateHeader = "Select the emote sets you want to download:"
 		m.emoteDownloader.emoteSets = fetchEmoteSetsOfUser(m.emoteDownloader.user["emote_sets"].([]any))
 
 		m.choices = []string{}
 		for _, set := range m.emoteDownloader.emoteSets {
-			m.choices = append(m.choices, fmt.Sprintf("%s [%d Emotes]", set.name, len(set.emotes)))
+			m.choices = append(m.choices, set.String())
 		}
-	case "imagetypes":
-		m.stateHeader = "Select images types you want to download:"
+	case ImageTypes:
+		*m.stateHeader = "Select images types you want to download:"
 		// get selected emote sets
-		selectedSetNames := m.stateSelections["emotesets"]
+		selectedSetNames := m.stateSelections[Emotesets]
 		selectedSets := make([]*emoteSet, 0)
 		for _, set := range m.emoteDownloader.emoteSets {
 			if slices.Contains(selectedSetNames, set.String()) {
@@ -165,17 +228,19 @@ func (m *model) changeState() {
 		m.emoteDownloader.emoteSets = selectedSets
 
 		m.choices = []string{"webp", "avif", "png", "gif"}
-	case "imagesizes":
-		m.stateHeader = "Select the image sizes you want to download:"
+	case ImageSizes:
+		*m.stateHeader = "Select the image sizes you want to download:"
 		m.choices = []string{"1x", "2x", "3x", "4x"}
-	case "download":
-		m.stateHeader = "Downloading emotes..."
-		go downloadAndWriteEmoteSets(m,
-			m.emoteDownloader.emoteSets, m.stateSelections["imagetypes"], m.stateSelections["imagesizes"], m.emoteDownloader.user["username"].(string))
+	case Download:
+		go downloadAndWriteEmoteSets(m, m.emoteDownloader.emoteSets, m.stateSelections[ImageTypes], m.stateSelections[ImageSizes], m.emoteDownloader.user["username"].(string))
+		cmd = tickCmd()
 	}
 
 	// reset selected
 	m.selected = make(map[int]any)
+
+	m.currentState = nextState
+	return cmd
 }
 
 func (m model) View() string {
@@ -183,33 +248,36 @@ func (m model) View() string {
 	s := "---- 7TV Emote Downloader ----\n" +
 		"Downloads all emotes of a 7TV user/streamer\n\n"
 
-	s += fmt.Sprint(m.stateHeader + "\n")
+	s += fmt.Sprint(*m.stateHeader + "\n")
 
-	// Iterate over our choices
-	for i, choice := range m.choices {
+	if m.currentState == Emotesets || m.currentState == ImageTypes || m.currentState == ImageSizes {
+		// Iterate over our choices
+		for i, choice := range m.choices {
 
-		// Is the cursor pointing at this choice?
-		cursor := " " // no cursor
-		if m.cursor == i {
-			cursor = ">" // cursor!
+			// Is the cursor pointing at this choice?
+			cursor := " " // no cursor
+			if m.cursor == i {
+				cursor = ">" // cursor!
+			}
+
+			// Is this choice selected?
+			checked := " " // not selected
+			if _, ok := m.selected[i]; ok {
+				checked = "x" // selected!
+			}
+
+			// Render the row
+			s += fmt.Sprintf("%s [%s] %s\n", cursor, checked, choice)
 		}
-
-		// Is this choice selected?
-		checked := " " // not selected
-		if _, ok := m.selected[i]; ok {
-			checked = "x" // selected!
-		}
-
-		// Render the row
-		s += fmt.Sprintf("%s [%s] %s\n", cursor, checked, choice)
 	}
 
-	if m.states[m.currentState] == "download" {
-		s += fmt.Sprint("Indicator: " + m.emoteDownloader.currentDownloadIndicator + "\n")
+	if m.currentState == Download {
+		s += fmt.Sprint(m.emoteDownloader.currentDownloadIndicator + "\n")
+		s += m.downloadProgress.View() + "\n"
 	}
 
-	if m.states[m.currentState] == "username" {
-		s += m.textInput.View() + "\n"
+	if m.currentState == Username {
+		s += m.userIdInput.View() + "\n"
 	}
 
 	// The footer
