@@ -3,9 +3,11 @@ package downloader
 import (
 	"fmt"
 	"slices"
-	"time"
+	"strings"
 
+	"github.com/charmbracelet/bubbles/cursor"
 	"github.com/charmbracelet/bubbles/progress"
+	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -18,6 +20,7 @@ const (
 	ImageTypes
 	ImageSizes
 	Download
+	ErrorLog
 )
 
 var selectionStates map[selectionState]string = map[selectionState]string{
@@ -26,6 +29,7 @@ var selectionStates map[selectionState]string = map[selectionState]string{
 	ImageTypes: "ImageTypes",
 	ImageSizes: "ImageSizes",
 	Download:   "Download",
+	ErrorLog:   "ErrorLog",
 }
 
 func (state selectionState) String() string {
@@ -50,18 +54,21 @@ func (state selectionState) transition() selectionState {
 }
 
 type model struct {
+	downloadChannel  chan struct{}
 	cursor           int
 	choices          []string
 	selected         map[int]any
 	currentState     selectionState
 	stateSelections  map[selectionState][]string
 	userIdInput      textinput.Model
+	userLoadingInfo  string
 	stateHeader      *string
 	emoteDownloader  *emoteDownloader
 	downloadProgress progress.Model
+	errorLogArea     textarea.Model
 }
 
-type tickMsg time.Time
+type downloadMsg struct{}
 
 func InitialModel() *model {
 	// username input
@@ -75,16 +82,29 @@ func InitialModel() *model {
 	progress := progress.New(progress.WithDefaultGradient())
 	progress.Width = 50
 
+	// error log area
+	errorLogArea := textarea.New()
+	errorLogArea.SetWidth(50)
+	errorLogArea.SetHeight(30)
+	errorLogArea.ShowLineNumbers = false
+
 	stateHeader := "Please input the user id:"
 
 	model := &model{
-		emoteDownloader:  &emoteDownloader{},
+		downloadChannel: make(chan struct{}),
+		emoteDownloader: &emoteDownloader{
+			finished:   false,
+			errorLog:   make([]string, 0),
+			showErrors: false,
+		},
 		choices:          make([]string, 0),
 		stateSelections:  make(map[selectionState][]string),
 		selected:         make(map[int]any),
 		userIdInput:      userIdInput,
+		userLoadingInfo:  "",
 		stateHeader:      &stateHeader,
 		downloadProgress: progress,
+		errorLogArea:     errorLogArea,
 	}
 
 	return model
@@ -92,7 +112,7 @@ func InitialModel() *model {
 
 func (m model) Init() tea.Cmd {
 	// Just return `nil`, which means "no I/O right now, please."
-	return textinput.Blink
+	return m.userIdInput.Cursor.BlinkCmd()
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -108,6 +128,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	switch m.currentState {
 	case Username:
+		m.userIdInput.Focus()
 		m.userIdInput, cmd = m.userIdInput.Update(msg)
 
 		switch msg := msg.(type) {
@@ -119,33 +140,65 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				var err error
 				m.emoteDownloader.user, err = fetchUser(userId)
 				if err != nil {
-					m.userIdInput.SetValue(err.Error())
-					m.userIdInput.Blur()
+					m.userIdInput.Reset()
+
+					m.userLoadingInfo = fmt.Sprintf("\n%s - Please try again.\n", err.Error())
 					return m, cmd
 				}
 
-				username := m.emoteDownloader.user["username"].(string)
-				m.userIdInput.SetValue(username)
-
-				cmd = m.changeState()
-
-				return m, cmd
+				return m, tea.Batch(cmd, m.changeState())
 			}
 		}
 		return m, cmd
 	case Download:
-		switch msg.(type) {
-		case tickMsg:
+		switch msg := msg.(type) {
+		case downloadMsg:
 			cmd := m.downloadProgress.SetPercent(m.emoteDownloader.percentage)
-			return m, tea.Batch(cmd, tickCmd())
-			// FrameMsg is sent when the progress bar wants to animate itself
+			return m, tea.Sequence(cmd, downloadListenCmd(m.downloadChannel))
+		// FrameMsg is sent when the progress bar wants to animate itself
 		case progress.FrameMsg:
 			progressModel, cmd := m.downloadProgress.Update(msg)
 			m.downloadProgress = progressModel.(progress.Model)
 			return m, cmd
-		}
-		return m, tickCmd()
+		case tea.KeyMsg:
+			switch msg.String() {
+			case "f":
+				if len(m.emoteDownloader.errorLog) == 0 || !m.emoteDownloader.finished {
+					return m, nil
+				}
+				m.emoteDownloader.showErrors = true
+				m.currentState = ErrorLog
 
+				m.errorLogArea.SetValue(strings.Join(m.emoteDownloader.errorLog, "\n"))
+				cmd = m.errorLogArea.Focus()
+				m.errorLogArea.CursorStart()
+				m.errorLogArea.SetCursor(0)
+				m.errorLogArea.Cursor.SetMode(cursor.CursorStatic)
+
+				return m, cmd
+			}
+		}
+		return m, tea.Batch(cmd, downloadListenCmd(m.downloadChannel))
+	case ErrorLog:
+		switch msg := msg.(type) {
+
+		case tea.KeyMsg:
+			switch msg.String() {
+			case "f":
+				m.emoteDownloader.showErrors = false
+				m.currentState = Download
+
+				return m, cmd
+			case "up", "down", "left", "right":
+			default:
+				return m, cmd
+			}
+
+		}
+
+		m.errorLogArea, cmd = m.errorLogArea.Update(msg)
+
+		return m, cmd
 	default:
 		switch msg := msg.(type) {
 
@@ -153,7 +206,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case tea.KeyMsg:
 			// Cool, what was the actual key pressed?
 			switch msg.String() {
-			case "enter", " ":
+			case " ":
 				_, ok := m.selected[m.cursor]
 				if ok {
 					delete(m.selected, m.cursor)
@@ -161,7 +214,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.selected[m.cursor] = m.choices[m.cursor]
 				}
 				return m, cmd
-			case "s":
+			case "enter":
+				isEmpty := true
+				for i := range m.selected {
+					if _, exists := m.selected[i]; exists {
+						isEmpty = false
+					}
+				}
+				if !isEmpty {
+					cmd = m.changeState()
+				}
+				return m, cmd
+			case "backspace":
+				m.currentState -= 2
 				cmd := m.changeState()
 				return m, cmd
 			case "up", "k":
@@ -181,15 +246,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func tickCmd() tea.Cmd {
-	return tea.Tick(time.Millisecond*16, func(t time.Time) tea.Msg {
-		return tickMsg(t)
-	})
+func downloadListenCmd(sub chan struct{}) tea.Cmd {
+	return func() tea.Msg {
+		return downloadMsg(<-sub)
+	}
 }
 
 func (m *model) changeState() tea.Cmd {
 	var cmd tea.Cmd
 	nextState := selectionState.transition(m.currentState)
+
+	m.cursor = 0
 
 	// set choices according to state
 	if nextState != Username {
@@ -233,7 +300,7 @@ func (m *model) changeState() tea.Cmd {
 		m.choices = []string{"1x", "2x", "3x", "4x"}
 	case Download:
 		go downloadAndWriteEmoteSets(m, m.emoteDownloader.emoteSets, m.stateSelections[ImageTypes], m.stateSelections[ImageSizes], m.emoteDownloader.user["username"].(string))
-		cmd = tickCmd()
+		cmd = downloadListenCmd(m.downloadChannel)
 	}
 
 	// reset selected
@@ -248,9 +315,15 @@ func (m model) View() string {
 	s := "---- 7TV Emote Downloader ----\n" +
 		"Downloads all emotes of a 7TV user/streamer\n\n"
 
-	s += fmt.Sprint(*m.stateHeader + "\n")
+	if !m.emoteDownloader.finished {
+		s += fmt.Sprint(*m.stateHeader + "\n")
+	}
 
-	if m.currentState == Emotesets || m.currentState == ImageTypes || m.currentState == ImageSizes {
+	switch m.currentState {
+	case Username:
+		s += m.userIdInput.View() + "\n"
+		s += m.userLoadingInfo
+	case Emotesets, ImageTypes, ImageSizes:
 		// Iterate over our choices
 		for i, choice := range m.choices {
 
@@ -269,15 +342,17 @@ func (m model) View() string {
 			// Render the row
 			s += fmt.Sprintf("%s [%s] %s\n", cursor, checked, choice)
 		}
-	}
 
-	if m.currentState == Download {
+		s += "\nPress space to choose. | Press enter to confirm. | Press backspace to go back.\n"
+	case Download:
+		if !m.emoteDownloader.finished {
+			s += m.downloadProgress.View() + "\n\n"
+		}
+
 		s += fmt.Sprint(m.emoteDownloader.currentDownloadIndicator + "\n")
-		s += m.downloadProgress.View() + "\n"
-	}
-
-	if m.currentState == Username {
-		s += m.userIdInput.View() + "\n"
+	case ErrorLog:
+		s += m.errorLogArea.View()
+		s += "\nPress f to toggle errors.\n"
 	}
 
 	// The footer
