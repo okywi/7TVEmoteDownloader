@@ -152,7 +152,7 @@ func downloadEmote(model *model, emotePath string, emote *emote, selectedType st
 		}
 		resp, err := http.Get(url)
 
-		if err != nil || model.emoteDownloader.percentage > 0.5 && model.emoteDownloader.percentage < 0.7 {
+		if err != nil {
 			e := fmt.Errorf("failed to get emote %s", emote.name)
 			model.emoteDownloader.errorLog = append(model.emoteDownloader.errorLog, e.Error())
 			return e
